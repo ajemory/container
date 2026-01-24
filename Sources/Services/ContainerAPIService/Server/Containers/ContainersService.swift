@@ -231,20 +231,25 @@ public actor ContainersService {
             }
 
             let path = self.containerRoot.appendingPathComponent(configuration.id)
-            let systemPlatform = kernel.platform
-            let initFs = try await self.getInitBlock(for: systemPlatform.ociPlatform())
 
-            let bundle = try ContainerResource.Bundle.create(
-                path: path,
-                initialFilesystem: initFs,
-                kernel: kernel,
-                containerConfiguration: configuration
+            try Self.registerService(
+                plugin: self.runtimePlugins.first { $0.name == configuration.runtimeHandler }!,
+                loader: self.pluginLoader,
+                configuration: configuration,
+                path: path
+            )
+
+            let runtime = configuration.runtimeHandler
+            let sandboxClient = try await SandboxClient.create(
+                id: configuration.id,
+                runtime: runtime
             )
             do {
-                let containerImage = ClientImage(description: configuration.image)
-                let imageFs = try await containerImage.getCreateSnapshot(platform: configuration.platform)
-                try bundle.setContainerRootFs(cloning: imageFs)
-                try bundle.write(filename: "options.json", value: options)
+                try await sandboxClient.createBundle(
+                    configuration: configuration,
+                    kernel: kernel,
+                    options: options
+                )
 
                 let snapshot = ContainerSnapshot(
                     configuration: configuration,
@@ -253,11 +258,11 @@ public actor ContainersService {
                 )
                 await self.setContainerState(configuration.id, ContainerState(snapshot: snapshot), context: context)
             } catch {
-                do {
-                    try bundle.delete()
-                } catch {
-                    self.log.error("failed to delete bundle for container \(configuration.id): \(error)")
-                }
+                let label = Self.fullLaunchdServiceLabel(
+                    runtimeName: configuration.runtimeHandler,
+                    instanceId: configuration.id
+                )
+                try ServiceManager.deregister(fullServiceLabel: label)
                 throw error
             }
         }
