@@ -87,7 +87,8 @@ public actor ContainersService {
                     snapshot: .init(
                         configuration: config,
                         status: .stopped,
-                        networks: []
+                        networks: [],
+                        startedDate: nil
                     )
                 )
                 results[config.id] = state
@@ -254,7 +255,8 @@ public actor ContainersService {
                 let snapshot = ContainerSnapshot(
                     configuration: configuration,
                     status: .stopped,
-                    networks: []
+                    networks: [],
+                    startedDate: nil
                 )
                 await self.setContainerState(configuration.id, ContainerState(snapshot: snapshot), context: context)
             } catch {
@@ -376,6 +378,7 @@ public actor ContainersService {
                     let sandboxSnapshot = try await client.state()
                     state.snapshot.status = .running
                     state.snapshot.networks = sandboxSnapshot.networks
+                    state.snapshot.startedDate = Date()
                     await self.setContainerState(id, state, context: context)
                 }
             }
@@ -546,12 +549,26 @@ public actor ContainersService {
             instanceId: id
         )
 
-        let client = try state.getClient()
-        try await client.shutdown()
+        // Try to shutdown the client gracefully, but if the sandbox service
+        // is already dead (e.g., killed externally), we should still continue
+        // with state cleanup.
+        if let client = state.client {
+            do {
+                try await client.shutdown()
+            } catch {
+                self.log.error("Failed to shutdown sandbox service for \(id): \(error)")
+            }
+        }
 
-        // Deregister the service, launchd will terminate the process
-        try ServiceManager.deregister(fullServiceLabel: label)
-        self.log.info("Deregistered sandbox service for \(id)")
+        // Deregister the service, launchd will terminate the process.
+        // This may also fail if the service was already deregistered or
+        // the process was killed externally.
+        do {
+            try ServiceManager.deregister(fullServiceLabel: label)
+            self.log.info("Deregistered sandbox service for \(id)")
+        } catch {
+            self.log.error("Failed to deregister sandbox service for \(id): \(error)")
+        }
 
         state.snapshot.status = .stopped
         state.snapshot.networks = []

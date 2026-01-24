@@ -209,12 +209,12 @@ public struct Utility {
         if management.dnsDisabled {
             config.dns = nil
         } else {
-            let domain = management.dnsDomain ?? DefaultsStore.getOptional(key: .defaultDNSDomain)
+            let domain = management.dns.domain ?? DefaultsStore.getOptional(key: .defaultDNSDomain)
             config.dns = .init(
-                nameservers: management.dnsNameservers,
+                nameservers: management.dns.nameservers,
                 domain: domain,
-                searchDomains: management.dnsSearchDomains,
-                options: management.dnsOptions
+                searchDomains: management.dns.searchDomains,
+                options: management.dns.options
             )
         }
 
@@ -239,6 +239,7 @@ public struct Utility {
         config.publishedSockets = try Parser.publishSockets(management.publishSockets)
 
         config.ssh = management.ssh
+        config.readOnly = management.readOnly
 
         return (config, kernel)
     }
@@ -277,16 +278,17 @@ public struct Utility {
             }
 
             // attach the first network using the fqdn, and the rest using just the container ID
-            return networks.enumerated().map { item in
+            return try networks.enumerated().map { item in
+                let macAddress = try item.element.macAddress.map { try MACAddress($0) }
                 guard item.offset == 0 else {
                     return AttachmentConfiguration(
                         network: item.element.name,
-                        options: AttachmentOptions(hostname: containerId, macAddress: item.element.macAddress)
+                        options: AttachmentOptions(hostname: containerId, macAddress: macAddress)
                     )
                 }
                 return AttachmentConfiguration(
                     network: item.element.name,
-                    options: AttachmentOptions(hostname: fqdn ?? containerId, macAddress: item.element.macAddress)
+                    options: AttachmentOptions(hostname: fqdn ?? containerId, macAddress: macAddress)
                 )
             }
         }
