@@ -299,10 +299,20 @@ extension Application {
                 .setDescription("Starting BuildKit container")
             ])
 
+            let linuxData = LinuxRuntimeConfig(
+                kernelPath: kernel.path.path,
+                kernelCommandLine: kernel.commandLine,
+                kernelPlatform: kernel.platform,
+                initImageRef: ClientImage.initImageRef,
+                containerImageRef: config.image.reference,
+                containerPlatform: .current
+            )
+            let runtimeData = try JSONEncoder().encode(linuxData)
+
             try await client.create(
                 configuration: config,
                 options: .default,
-                kernel: kernel
+                runtimeData: runtimeData
             )
 
             try await startBuildKit(client: client, id: Builder.builderContainerId, progressUpdate, taskManager)
@@ -346,4 +356,14 @@ private func startBuildKit(
         }
         throw ContainerizationError(.internalError, message: "failed to start BuildKit: \(error)")
     }
+}
+
+// TODO: Remove once CLI plugin architecture allows importing from RuntimeLinux directly.
+private struct LinuxRuntimeConfig: Codable {
+    let kernelPath: String
+    let kernelCommandLine: Kernel.CommandLine
+    let kernelPlatform: SystemPlatform
+    let initImageRef: String
+    let containerImageRef: String
+    let containerPlatform: Platform
 }

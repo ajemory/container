@@ -180,24 +180,17 @@ public struct ContainersHarness: Sendable {
                 message: "container configuration cannot be empty"
             )
         }
-        let kdata = message.dataNoCopy(key: .kernel)
-        guard let kdata else {
-            throw ContainerizationError(
-                .invalidArgument,
-                message: "kernel cannot be empty"
-            )
-        }
+        let config = try JSONDecoder().decode(ContainerConfiguration.self, from: data)
+
         let odata = message.dataNoCopy(key: .containerOptions)
         var options: ContainerCreateOptions = .default
         if let odata {
             options = try JSONDecoder().decode(ContainerCreateOptions.self, from: odata)
         }
-        let config = try JSONDecoder().decode(ContainerConfiguration.self, from: data)
-        let kernel = try JSONDecoder().decode(Kernel.self, from: kdata)
 
-        let initImage = message.string(key: .initImage)
+        let runtimeData = message.dataNoCopy(key: .runtimeData)
 
-        try await service.create(configuration: config, kernel: kernel, options: options, initImage: initImage)
+        try await service.create(configuration: config, options: options, runtimeData: runtimeData)
         return message.reply()
     }
 
@@ -328,7 +321,7 @@ public struct ContainersHarness: Sendable {
         }
         let archiveUrl = URL(fileURLWithPath: archive)
 
-        try await service.exportRootfs(id: id, archive: archiveUrl)
+        try await service.exportImage(id: id, archive: archiveUrl)
         return message.reply()
     }
 }

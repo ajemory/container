@@ -21,14 +21,12 @@ import ContainerResource
 import ContainerSandboxServiceClient
 import ContainerXPC
 import Containerization
-import ContainerizationEXT4
 import ContainerizationError
 import ContainerizationExtras
 import ContainerizationOCI
 import ContainerizationOS
 import Foundation
 import Logging
-import SystemPackage
 
 public actor ContainersService {
     struct ContainerState {
@@ -275,7 +273,11 @@ public actor ContainersService {
     }
 
     /// Create a new container from the provided id and configuration.
-    public func create(configuration: ContainerConfiguration, kernel: Kernel, options: ContainerCreateOptions, initImage: String? = nil) async throws {
+    public func create(
+        configuration: ContainerConfiguration,
+        options: ContainerCreateOptions,
+        runtimeData: Data? = nil
+    ) async throws {
         log.debug(
             "ContainersService: enter",
             metadata: [
@@ -329,13 +331,6 @@ public actor ContainersService {
                 )
             }
 
-            // Protect against a user providing a memory amount that will cause us to not be able
-            // to boot. We can go lower, but this is a somewhat safe threshold. Containerization
-            // also gives a little bit extra than the user asked for to account for guest agent overhead.
-            //
-            // NOTE: We could potentially leave this validation to the sandbox service(s), as
-            // it's possible there could be an implementation that can get away with a lower
-            // amount and be perfectly safe.
             let minimumMemory: UInt64 = 200.mib()
             guard configuration.resources.memoryInBytes >= minimumMemory else {
                 throw ContainerizationError(
@@ -345,44 +340,39 @@ public actor ContainersService {
             }
 
             let path = self.containerRoot.appendingPathComponent(configuration.id)
-            let systemPlatform = kernel.platform
-
-            // Fetch init image (custom or default)
-            self.log.debug(
-                "ContainersService: get init block",
-                metadata: [
-                    "id": "\(configuration.id)"
-                ]
-            )
-            let initFilesystem = try await self.getInitBlock(for: systemPlatform.ociPlatform(), imageRef: initImage)
 
             do {
-                self.log.debug(
-                    "create snapshot",
-                    metadata: [
-                        "id": "\(configuration.id)",
-                        "ref": "\(configuration.image.reference)",
-                    ])
-                let containerImage = ClientImage(description: configuration.image)
-                let imageFs = try await options.rootFsOverride == nil ? containerImage.getCreateSnapshot(platform: configuration.platform) : nil
+                try FileManager.default.createDirectory(at: path, withIntermediateDirectories: true)
 
-                self.log.debug(
-                    "configure runtime",
-                    metadata: [
-                        "id": "\(configuration.id)",
-                        "kernel": "\(kernel.path)",
-                        "initfs": "\(initImage ?? ClientImage.initImageRef)",
-                    ])
                 let runtimeConfig = RuntimeConfiguration(
                     path: path,
-                    initialFilesystem: initFilesystem,
-                    kernel: kernel,
                     containerConfiguration: configuration,
-                    containerRootFilesystem: imageFs,
-                    options: options
+                    containerCreateOptions: options,
+                    runtimeData: runtimeData
+                )
+                try runtimeConfig.writeRuntimeConfiguration()
+
+                // Register sandbox service and provision the bundle
+                try Self.registerService(
+                    plugin: self.runtimePlugins.first { $0.name == configuration.runtimeHandler }!,
+                    loader: self.pluginLoader,
+                    configuration: configuration,
+                    path: path,
+                    debug: self.debugHelpers
                 )
 
-                try runtimeConfig.writeRuntimeConfiguration()
+                let sandboxClient = try await SandboxClient.create(
+                    id: configuration.id,
+                    runtime: configuration.runtimeHandler
+                )
+                try await sandboxClient.bootstrap(stdio: [], allocatedAttachments: [], createOnly: true)
+                try await sandboxClient.shutdown()
+
+                let label = Self.fullLaunchdServiceLabel(
+                    runtimeName: configuration.runtimeHandler,
+                    instanceId: configuration.id
+                )
+                try? ServiceManager.deregister(fullServiceLabel: label)
 
                 let snapshot = ContainerSnapshot(
                     configuration: configuration,
@@ -392,6 +382,8 @@ public actor ContainersService {
                 )
                 await self.setContainerState(configuration.id, ContainerState(snapshot: snapshot, allocatedAttachments: []), context: context)
             } catch {
+                // Clean up partially-created container directory
+                try? FileManager.default.removeItem(at: path)
                 throw error
             }
         }
@@ -908,7 +900,7 @@ public actor ContainersService {
         return Self.calculateDirectorySize(at: containerPath)
     }
 
-    public func exportRootfs(id: String, archive: URL) async throws {
+    public func exportImage(id: String, archive: URL) async throws {
         self.log.debug("\(#function)")
 
         let state = try self._getContainerState(id: id)
@@ -916,10 +908,27 @@ public actor ContainersService {
             throw ContainerizationError(.invalidState, message: "container is not stopped")
         }
 
+        let config = state.snapshot.configuration
         let path = self.containerRoot.appendingPathComponent(id)
-        let bundle = ContainerResource.Bundle(path: path)
-        let rootfs = bundle.containerRootfsBlock
-        try EXT4.EXT4Reader(blockDevice: FilePath(rootfs)).export(archive: FilePath(archive))
+
+        // Register the runtime service (it may have been deregistered on stop)
+        try Self.registerService(
+            plugin: self.runtimePlugins.first { $0.name == config.runtimeHandler }!,
+            loader: self.pluginLoader,
+            configuration: config,
+            path: path,
+            debug: self.debugHelpers
+        )
+
+        let sandboxClient = try await SandboxClient.create(id: id, runtime: config.runtimeHandler)
+        try await sandboxClient.export(archive: archive)
+        try await sandboxClient.shutdown()
+
+        let label = Self.fullLaunchdServiceLabel(
+            runtimeName: config.runtimeHandler,
+            instanceId: id
+        )
+        try? ServiceManager.deregister(fullServiceLabel: label)
     }
 
     private func handleContainerExit(id: String, code: ExitStatus? = nil) async throws {
@@ -1103,16 +1112,8 @@ public actor ContainersService {
     private func getContainerCreationOptions(id: String) throws -> ContainerCreateOptions {
         let path = self.containerRoot.appendingPathComponent(id)
         let bundle = ContainerResource.Bundle(path: path)
-        let options: ContainerCreateOptions = try bundle.load(filename: "options.json")
+        let options: ContainerCreateOptions = try bundle.load(filename: ContainerResource.Bundle.containerOptionsFilename)
         return options
-    }
-
-    private func getInitBlock(for platform: Platform, imageRef: String? = nil) async throws -> Filesystem {
-        let ref = imageRef ?? ClientImage.initImageRef
-        let initImage = try await ClientImage.fetch(reference: ref, platform: platform)
-        var fs = try await initImage.getCreateSnapshot(platform: platform)
-        fs.options = ["ro"]
-        return fs
     }
 
     private static func registerService(
@@ -1159,22 +1160,12 @@ public actor ContainersService {
         id == processID
     }
 
-    /// Get container configuration, either from existing bundle or from RuntimeConfiguration
+    /// Get container configuration from bundle files written at create time.
     private static func getContainerConfiguration(at path: URL) throws -> (ContainerConfiguration, ContainerCreateOptions?) {
         let bundle = ContainerResource.Bundle(path: path)
-        do {
-            let config = try bundle.configuration
-            let options: ContainerCreateOptions? = try? bundle.load(filename: "options.json")
-            return (config, options)
-        } catch {
-            // Bundle doesn't exist or incomplete, try runtime configuration
-            // This handles containers that were created but not started yet
-            let runtimeConfig = try RuntimeConfiguration.readRuntimeConfiguration(from: path)
-            guard let config = runtimeConfig.containerConfiguration else {
-                throw ContainerizationError(.internalError, message: "runtime configuration missing container configuration")
-            }
-            return (config, runtimeConfig.options)
-        }
+        let config = try bundle.configuration
+        let options: ContainerCreateOptions? = try? bundle.load(filename: ContainerResource.Bundle.containerOptionsFilename)
+        return (config, options)
     }
 }
 

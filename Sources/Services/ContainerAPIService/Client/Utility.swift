@@ -84,7 +84,7 @@ public struct Utility {
         imageFetch: Flags.ImageFetch,
         progressUpdate: @escaping ProgressUpdateHandler,
         log: Logger
-    ) async throws -> (ContainerConfiguration, Kernel, String?) {
+    ) async throws -> (ContainerConfiguration, Data?) {
         let requestedPlatform = try DefaultPlatform.resolveWithDefaults(
             platform: management.platform,
             os: management.os,
@@ -260,7 +260,18 @@ public struct Utility {
             config.runtimeHandler = runtime
         }
 
-        return (config, kernel, management.initImage)
+        // Build runtime data
+        let linuxData = LinuxRuntimeConfig(
+            kernelPath: kernel.path.path,
+            kernelCommandLine: kernel.commandLine,
+            kernelPlatform: kernel.platform,
+            initImageRef: initImageRef,
+            containerImageRef: image,
+            containerPlatform: requestedPlatform
+        )
+        let runtimeData = try JSONEncoder().encode(linuxData)
+
+        return (config, runtimeData)
     }
 
     static func getAttachmentConfigurations(
@@ -391,4 +402,14 @@ public struct Utility {
 
         return volume
     }
+}
+
+// TODO: Remove once CLI plugin architecture allows importing from RuntimeLinux directly.
+private struct LinuxRuntimeConfig: Codable {
+    let kernelPath: String
+    let kernelCommandLine: Kernel.CommandLine
+    let kernelPlatform: SystemPlatform
+    let initImageRef: String
+    let containerImageRef: String
+    let containerPlatform: Platform
 }

@@ -18,6 +18,7 @@ import ContainerAPIClient
 import ContainerOS
 import ContainerPersistence
 import ContainerResource
+import ContainerSandboxService
 import ContainerSandboxServiceClient
 import ContainerXPC
 import Containerization
@@ -36,8 +37,9 @@ import SystemPackage
 import struct ContainerizationOCI.Mount
 import struct ContainerizationOCI.Process
 
-/// An XPC service that manages the lifecycle of a single VM-backed container.
-public actor SandboxService {
+/// Linux-specific implementation of SandboxServiceProtocol.
+/// Manages the lifecycle of a single Linux VM-backed container.
+public actor LinuxSandboxService: SandboxServiceProtocol {
     private let connection: xpc_connection_t
     private let root: URL
     private let interfaceStrategies: [NetworkPluginInfo: InterfaceStrategy]
@@ -138,9 +140,15 @@ public actor SandboxService {
         self.log.debug("enter", metadata: ["func": "\(#function)"])
         defer { self.log.debug("exit", metadata: ["func": "\(#function)"]) }
 
-        // Create the bundle if it doesn't exist yet
-        if !self.bundleExists(at: self.root) {
-            try self.createBundle()
+        // Provision the bundle if it doesn't exist yet
+        if loadBundle(at: self.root) == nil {
+            try await self.createBundle()
+        }
+
+        // If create-only, return without booting the VM
+        let createOnly = message.bool(key: SandboxKeys.createOnly.rawValue)
+        if createOnly {
+            return message.reply()
         }
 
         return try await self.lock.withLock { _ in
@@ -151,9 +159,11 @@ public actor SandboxService {
                 )
             }
 
+<<<<<<< HEAD
             let dynamicEnv = try message.dynamicEnv()
-
-            let bundle = ContainerResource.Bundle(path: self.root)
+=======
+            let bundle = LinuxBundle(path: self.root)
+>>>>>>> 52dbf28 (Reverting to previous architecture)
             try bundle.createLogFile()
 
             var config = try bundle.configuration
@@ -676,6 +686,20 @@ public actor SandboxService {
                 message: "cannot dial: container is not running"
             )
         }
+    }
+
+    @Sendable
+    public func export(_ message: XPCMessage) async throws -> XPCMessage {
+        self.log.debug("enter", metadata: ["func": "\(#function)"])
+        defer { self.log.debug("exit", metadata: ["func": "\(#function)"]) }
+
+        guard let archivePath = message.string(key: SandboxKeys.archive.rawValue) else {
+            throw ContainerizationError(.invalidArgument, message: "archive path cannot be empty")
+        }
+        let archive = URL(fileURLWithPath: archivePath)
+        let bundle = LinuxBundle(path: self.root)
+        try bundle.exportImage(to: archive)
+        return message.reply()
     }
 
     private func startInitProcess(lock: AsyncLock.Context) async throws {
@@ -1220,7 +1244,7 @@ extension XPCMessage {
     }
 }
 
-extension ContainerResource.Bundle {
+extension LinuxBundle {
     func createLogFile() throws {
         // Create the log file we'll write stdio to.
         // O_TRUNC resolves a log delay issue on restarted containers by force-updating internal state
@@ -1348,7 +1372,7 @@ extension FileHandle: @retroactive ReaderStream, @retroactive Writer {
 
 // MARK: State handler and bundle creation helpers
 
-extension SandboxService {
+extension LinuxSandboxService {
     private func initializeWaiters(for id: String) throws {
         guard waiters[id] == nil else {
             throw ContainerizationError(.invalidState, message: "waiter for \(id) already initialized")
@@ -1408,7 +1432,7 @@ extension SandboxService {
         let container: LinuxContainer
         let config: ContainerConfiguration
         let attachments: [Attachment]
-        let bundle: ContainerResource.Bundle
+        let bundle: LinuxBundle
         let io: (in: FileHandle?, out: MultiWriter?, err: MultiWriter?)
     }
 
@@ -1433,34 +1457,66 @@ extension SandboxService {
         self.state = new
     }
 
-    /// Check if a bundle exists at the given path
-    private func bundleExists(at path: URL) -> Bool {
-        guard FileManager.default.fileExists(atPath: path.path) else {
-            return false
-        }
-
-        let bundle = ContainerResource.Bundle(path: path)
+    /// Try to load a provisioned bundle. Returns nil if createBundle() hasn't run yet.
+    private func loadBundle(at path: URL) -> LinuxBundle? {
+        let bundle = LinuxBundle(path: path)
         do {
             _ = try bundle.configuration
-            return true
+            return bundle
         } catch {
-            return false
+            return nil
         }
     }
 
-    /// Create bundle from RuntimeConfiguration
-    private func createBundle() throws {
+    /// Create bundle from RuntimeConfiguration.
+    /// Binary files (kernel.bin, initfs.ext4, rootfs.ext4) are already provisioned
+    /// by the API server via source processing. This method writes only the JSON
+    /// metadata files that the bootstrap process expects.
+    private func createBundle() async throws {
         do {
             let runtimeConfig = try RuntimeConfiguration.readRuntimeConfiguration(from: self.root)
-            _ = try ContainerResource.Bundle.create(
-                path: runtimeConfig.path,
-                initialFilesystem: runtimeConfig.initialFilesystem,
-                kernel: runtimeConfig.kernel,
-                containerConfiguration: runtimeConfig.containerConfiguration,
-                containerRootFilesystem: runtimeConfig.containerRootFilesystem,
-                options: runtimeConfig.options
+
+            guard let runtimeDataBlob = runtimeConfig.runtimeData else {
+                throw ContainerizationError(.invalidArgument, message: "missing runtimeData for Linux container")
+            }
+            let linuxData = try JSONDecoder().decode(LinuxRuntimeData.self, from: runtimeDataBlob)
+
+            // Create bundle with common files (config.json, options.json)
+            let bundle = try LinuxBundle.create(
+                path: self.root,
+                configuration: runtimeConfig.containerConfiguration,
+                options: runtimeConfig.containerCreateOptions
             )
-            self.log.info("created bundle", metadata: ["configPath": "\(runtimeConfig.path)"])
+
+            // Clone kernel binary
+            let kernelSource = URL(fileURLWithPath: linuxData.kernelPath)
+            let kernelDest = self.root.appendingPathComponent(LinuxBundle.kernelBinaryFilename)
+            try FileManager.default.copyItem(at: kernelSource, to: kernelDest)
+
+            // Write kernel metadata
+            let kernel = Kernel(path: kernelDest, platform: linuxData.kernelPlatform, commandline: linuxData.kernelCommandLine)
+            try bundle.write(filename: LinuxBundle.kernelFilename, value: kernel)
+
+            // Fetch and snapshot init image
+            let initImage = try await ClientImage.fetch(reference: linuxData.initImageRef, platform: .current)
+            let initFs = try await initImage.getCreateSnapshot(platform: .current)
+            let initDest = self.root.appendingPathComponent(LinuxBundle.initfsFilename)
+            _ = try initFs.clone(to: initDest.absolutePath())
+
+            // Fetch and snapshot container image
+            let containerImage = try await ClientImage.fetch(reference: linuxData.containerImageRef, platform: linuxData.containerPlatform)
+            let containerFs = try await containerImage.getCreateSnapshot(platform: linuxData.containerPlatform)
+            let rootfsDest = self.root.appendingPathComponent(LinuxBundle.containerRootFsBlockFilename)
+            _ = try containerFs.clone(to: rootfsDest.absolutePath())
+
+            // Write rootfs metadata
+            var rootfs = Filesystem.block(format: "ext4", source: rootfsDest.path, destination: "/", options: [])
+            if runtimeConfig.containerConfiguration.readOnly {
+                rootfs.options.append("ro")
+            }
+            try bundle.write(filename: LinuxBundle.containerRootFsFilename, value: rootfs)
+
+            self.log.info("created bundle", metadata: ["configPath": "\(self.root)"])
         } catch {
             self.log.error("failed to create bundle", metadata: ["error": "\(error)"])
             throw error

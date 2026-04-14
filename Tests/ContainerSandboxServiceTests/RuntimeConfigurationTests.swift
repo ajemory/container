@@ -14,23 +14,17 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
-// import ContainerAPIService
 import ContainerResource
 import ContainerSandboxServiceClient
 import Containerization
-// import ContainerizationOCI
+import ContainerizationOCI
 import Foundation
 import Testing
 
-/// Unit tests for RuntimeConfiguration functionality.
-///
-/// These tests verify the runtime configuration serialization and deserialization,
-/// ensuring that configuration can be properly written, read, and used to create bundles.
+@Suite("RuntimeConfiguration Tests")
 struct RuntimeConfigurationTests {
 
-    /// Test that reading non-existent runtime configuration file throws
-    /// appropriate error
-    @Test
+    @Test("Read non-existent runtime configuration throws error")
     func testReadNonExistentRuntimeConfiguration() throws {
         let tempDir = FileManager.default.temporaryDirectory
         let nonExistentPath = tempDir.appendingPathComponent("non-existent-\(UUID()).json")
@@ -40,9 +34,8 @@ struct RuntimeConfigurationTests {
         }
     }
 
-    /// Test that runtime configuration reads and writes as expected
-    @Test
-    func testRuntimeConfigurationReadWrite() throws {
+    @Test("RuntimeConfiguration round-trips with containerConfiguration and runtimeData")
+    func testNewFormatRoundTrip() throws {
         let tempDir = FileManager.default.temporaryDirectory
         let bundlePath = tempDir.appendingPathComponent("test-bundle-\(UUID())")
 
@@ -50,51 +43,120 @@ struct RuntimeConfigurationTests {
             try? FileManager.default.removeItem(at: bundlePath)
         }
 
-        let initFs = Filesystem.virtiofs(
-            source: "/path/to/initfs",
-            destination: "/",
-            options: ["ro"]
+        let descriptor = Descriptor(
+            mediaType: "application/vnd.oci.image.index.v1+json",
+            digest: "sha256:1234567890abcdef",
+            size: 1024
+        )
+        let containerConfig = ContainerConfiguration(
+            id: "test-container",
+            image: ImageDescription(reference: "test-image", descriptor: descriptor),
+            process: ProcessConfiguration(
+                executable: "/bin/sh",
+                arguments: ["-c", "echo hello"],
+                environment: ["PATH=/usr/bin:/bin"]
+            )
+        )
+
+        let runtimeData = Data("test-runtime-data".utf8)
+
+        let config = RuntimeConfiguration(
+            path: bundlePath,
+            containerConfiguration: containerConfig,
+            containerCreateOptions: .default,
+            runtimeData: runtimeData
+        )
+
+        try config.writeRuntimeConfiguration()
+        let decoded = try RuntimeConfiguration.readRuntimeConfiguration(from: bundlePath)
+
+        #expect(decoded.path == bundlePath)
+        #expect(decoded.containerConfiguration.id == "test-container")
+        #expect(decoded.containerCreateOptions.autoRemove == false)
+        #expect(decoded.runtimeData == runtimeData)
+    }
+
+    @Test("RuntimeConfiguration with nil runtimeData")
+    func testNilRuntimeData() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+        let bundlePath = tempDir.appendingPathComponent("test-bundle-\(UUID())")
+
+        defer {
+            try? FileManager.default.removeItem(at: bundlePath)
+        }
+
+        let descriptor = Descriptor(
+            mediaType: "application/vnd.oci.image.index.v1+json",
+            digest: "sha256:1234567890abcdef",
+            size: 1024
+        )
+        let containerConfig = ContainerConfiguration(
+            id: "test-nil-data",
+            image: ImageDescription(reference: "test-image", descriptor: descriptor),
+            process: ProcessConfiguration(
+                executable: "/bin/sh",
+                arguments: [],
+                environment: []
+            )
+        )
+
+        let config = RuntimeConfiguration(
+            path: bundlePath,
+            containerConfiguration: containerConfig,
+            containerCreateOptions: .default,
+            runtimeData: nil
+        )
+
+        try config.writeRuntimeConfiguration()
+        let decoded = try RuntimeConfiguration.readRuntimeConfiguration(from: bundlePath)
+
+        #expect(decoded.runtimeData == nil)
+        #expect(decoded.containerConfiguration.id == "test-nil-data")
+    }
+
+    @Test("RuntimeConfiguration decodes legacy format")
+    func testLegacyFormatDecode() throws {
+        let descriptor = Descriptor(
+            mediaType: "application/vnd.oci.image.index.v1+json",
+            digest: "sha256:abc123",
+            size: 1024
+        )
+        let containerConfig = ContainerConfiguration(
+            id: "legacy-container",
+            image: ImageDescription(reference: "ubuntu:latest", descriptor: descriptor),
+            process: ProcessConfiguration(
+                executable: "/bin/sh",
+                arguments: [],
+                environment: []
+            )
         )
 
         let kernel = Kernel(
             path: URL(fileURLWithPath: "/path/to/kernel"),
             platform: .linuxArm
         )
-
-        let runtimeConfig = RuntimeConfiguration(
-            path: bundlePath,
-            initialFilesystem: initFs,
-            kernel: kernel,
-            containerConfiguration: nil,
-            containerRootFilesystem: nil,
-            options: nil
+        let initFs = Filesystem.virtiofs(
+            source: "/path/to/initfs",
+            destination: "/",
+            options: ["ro"]
         )
 
-        try runtimeConfig.writeRuntimeConfiguration()
+        // Encode each piece and assemble into legacy format
+        let encoder = JSONEncoder()
+        let configJSON = try JSONSerialization.jsonObject(with: encoder.encode(containerConfig))
+        let kernelJSON = try JSONSerialization.jsonObject(with: encoder.encode(kernel))
+        let initFsJSON = try JSONSerialization.jsonObject(with: encoder.encode(initFs))
 
-        defer {
-            try? FileManager.default.removeItem(at: runtimeConfig.runtimeConfigurationPath)
-        }
+        let legacyJSON: [String: Any] = [
+            "path": "/tmp/legacy-container",
+            "containerConfiguration": configJSON,
+            "initialFilesystem": initFsJSON,
+            "kernel": kernelJSON,
+        ]
+        let data = try JSONSerialization.data(withJSONObject: legacyJSON)
+        let decoded = try JSONDecoder().decode(RuntimeConfiguration.self, from: data)
 
-        let readRuntimeConfig = try RuntimeConfiguration.readRuntimeConfiguration(from: bundlePath)
-
-        #expect(
-            readRuntimeConfig.path == bundlePath,
-            "Path should match")
-        #expect(
-            readRuntimeConfig.kernel.path == kernel.path,
-            "Kernel path should match")
-        #expect(
-            readRuntimeConfig.initialFilesystem.source == initFs.source,
-            "Initial filesystem source should match")
-        #expect(
-            readRuntimeConfig.containerConfiguration == nil,
-            "Container configuration should be nil")
-        #expect(
-            readRuntimeConfig.containerRootFilesystem == nil,
-            "Root filesystem should be nil")
-        #expect(
-            readRuntimeConfig.options == nil,
-            "Options should be nil")
+        #expect(decoded.containerConfiguration.id == "legacy-container")
+        #expect(decoded.runtimeData != nil)
     }
 }

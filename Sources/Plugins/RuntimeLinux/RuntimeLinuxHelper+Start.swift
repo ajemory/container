@@ -74,7 +74,7 @@ extension RuntimeLinuxHelper {
                 log.info("configuring XPC server")
                 nonisolated(unsafe) let anonymousConnection = xpc_connection_create(nil, nil)
 
-                let server = SandboxService(
+                let server = LinuxSandboxService(
                     root: .init(fileURLWithPath: root),
                     interfaceStrategies: interfaceStrategies,
                     eventLoopGroup: eventLoopGroup,
@@ -104,6 +104,7 @@ extension RuntimeLinuxHelper {
                         SandboxRoutes.dial.rawValue: server.dial,
                         SandboxRoutes.shutdown.rawValue: server.shutdown,
                         SandboxRoutes.statistics.rawValue: server.statistics,
+                        SandboxRoutes.export.rawValue: server.export,
                     ],
                     log: log
                 )

@@ -41,4 +41,6 @@ public enum SandboxRoutes: String {
     case shutdown = "com.apple.container.sandbox/shutdown"
     /// Get statistics for the sandbox.
     case statistics = "com.apple.container.sandbox/statistics"
+    /// Export the container's filesystem image.
+    case export = "com.apple.container.sandbox/export"
 }

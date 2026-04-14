@@ -134,6 +134,9 @@ public enum XPCKeys: String {
 
     /// Disk usage
     case diskUsageStats
+
+    /// Opaque runtime-specific data
+    case runtimeData
 }
 
 public enum XPCRoute: String {
