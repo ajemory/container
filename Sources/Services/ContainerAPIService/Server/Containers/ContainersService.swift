@@ -113,7 +113,7 @@ public actor ContainersService {
                             ]
                         )
 
-                        let bundle = ContainerResource.Bundle(path: dir)
+                        let bundle = ContainerBundle(path: dir)
                         try? bundle.delete()
                         continue
                     }
@@ -365,7 +365,7 @@ public actor ContainersService {
                     id: configuration.id,
                     runtime: configuration.runtimeHandler
                 )
-                try await sandboxClient.bootstrap(stdio: [], allocatedAttachments: [], createOnly: true)
+                try await sandboxClient.provision()
                 try await sandboxClient.shutdown()
 
                 let label = Self.fullLaunchdServiceLabel(
@@ -776,7 +776,7 @@ public actor ContainersService {
         do {
             _ = try _getContainerState(id: id)
             let path = self.containerRoot.appendingPathComponent(id)
-            let bundle = ContainerResource.Bundle(path: path)
+            let bundle = ContainerBundle(path: path)
             return [
                 try FileHandle(forReadingFrom: bundle.containerLog),
                 try FileHandle(forReadingFrom: bundle.bootlog),
@@ -921,14 +921,17 @@ public actor ContainersService {
         )
 
         let sandboxClient = try await SandboxClient.create(id: id, runtime: config.runtimeHandler)
-        try await sandboxClient.export(archive: archive)
-        try await sandboxClient.shutdown()
-
         let label = Self.fullLaunchdServiceLabel(
             runtimeName: config.runtimeHandler,
             instanceId: id
         )
-        try? ServiceManager.deregister(fullServiceLabel: label)
+        defer {
+            Task {
+                try? await sandboxClient.shutdown()
+                try? ServiceManager.deregister(fullServiceLabel: label)
+            }
+        }
+        try await sandboxClient.export(archive: archive)
     }
 
     private func handleContainerExit(id: String, code: ExitStatus? = nil) async throws {
@@ -964,7 +967,7 @@ public actor ContainersService {
         self.log.info("shutting down sandbox service", metadata: ["id": "\(id)"])
 
         let path = self.containerRoot.appendingPathComponent(id)
-        let bundle = ContainerResource.Bundle(path: path)
+        let bundle = ContainerBundle(path: path)
         let config = try bundle.configuration
         let label = Self.fullLaunchdServiceLabel(
             runtimeName: config.runtimeHandler,
@@ -1067,7 +1070,7 @@ public actor ContainersService {
         // Try to get config for service deregistration
         // Don't fail if bundle is incomplete
         var config: ContainerConfiguration?
-        let bundle = ContainerResource.Bundle(path: path)
+        let bundle = ContainerBundle(path: path)
         do {
             config = try bundle.configuration
         } catch {
@@ -1111,8 +1114,8 @@ public actor ContainersService {
 
     private func getContainerCreationOptions(id: String) throws -> ContainerCreateOptions {
         let path = self.containerRoot.appendingPathComponent(id)
-        let bundle = ContainerResource.Bundle(path: path)
-        let options: ContainerCreateOptions = try bundle.load(filename: ContainerResource.Bundle.containerOptionsFilename)
+        let bundle = ContainerBundle(path: path)
+        let options: ContainerCreateOptions = try bundle.load(filename: ContainerBundle.containerOptionsFilename)
         return options
     }
 
@@ -1162,9 +1165,9 @@ public actor ContainersService {
 
     /// Get container configuration from bundle files written at create time.
     private static func getContainerConfiguration(at path: URL) throws -> (ContainerConfiguration, ContainerCreateOptions?) {
-        let bundle = ContainerResource.Bundle(path: path)
+        let bundle = ContainerBundle(path: path)
         let config = try bundle.configuration
-        let options: ContainerCreateOptions? = try? bundle.load(filename: ContainerResource.Bundle.containerOptionsFilename)
+        let options: ContainerCreateOptions? = try? bundle.load(filename: ContainerBundle.containerOptionsFilename)
         return (config, options)
     }
 }

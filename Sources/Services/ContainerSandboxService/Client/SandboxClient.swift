@@ -105,9 +105,6 @@ extension SandboxClient {
             request.set(key: SandboxKeys.dynamicEnv.rawValue, value: dynamicEnv)
 
             try request.setAllocatedAttachments(allocatedAttachments)
-            if createOnly {
-                request.set(key: SandboxKeys.createOnly.rawValue, value: true)
-            }
             try await self.client.send(request)
         } catch {
             throw ContainerizationError(
@@ -295,6 +292,19 @@ extension SandboxClient {
             throw ContainerizationError(
                 .internalError,
                 message: "failed to export container image",
+                cause: error
+            )
+        }
+    }
+
+    public func provision() async throws {
+        let request = XPCMessage(route: SandboxRoutes.provision.rawValue)
+        do {
+            try await self.client.send(request)
+        } catch {
+            throw ContainerizationError(
+                .internalError,
+                message: "failed to provision container \(self.id)",
                 cause: error
             )
         }

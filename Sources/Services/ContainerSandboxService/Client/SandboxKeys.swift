@@ -46,8 +46,8 @@ public enum SandboxKeys: String {
     /// Special-case environment variables recomputed on each container start
     case dynamicEnv
 
-    /// Flag indicating create-only mode (provision but do not start).
-    case createOnly
+    /// Export archive path.
+    case archive
 
     /// Network resource keys.
     case allocatedAttachments

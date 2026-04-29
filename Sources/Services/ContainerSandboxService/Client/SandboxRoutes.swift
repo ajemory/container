@@ -43,4 +43,6 @@ public enum SandboxRoutes: String {
     case statistics = "com.apple.container.sandbox/statistics"
     /// Export the container's filesystem image.
     case export = "com.apple.container.sandbox/export"
+    /// Provision the container bundle without starting the VM.
+    case provision = "com.apple.container.sandbox/provision"
 }

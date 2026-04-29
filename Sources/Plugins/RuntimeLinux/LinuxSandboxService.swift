@@ -129,6 +129,18 @@ public actor LinuxSandboxService: SandboxServiceProtocol {
         return reply
     }
 
+    @Sendable
+    public func provision(_ message: XPCMessage) async throws -> XPCMessage {
+        self.log.debug("enter", metadata: ["func": "\(#function)"])
+        defer { self.log.debug("exit", metadata: ["func": "\(#function)"]) }
+
+        if loadBundle(at: self.root) == nil {
+            try await self.createBundle()
+        }
+
+        return message.reply()
+    }
+
     /// Start the VM and the guest agent process for a container.
     ///
     /// - Parameters:
@@ -140,15 +152,9 @@ public actor LinuxSandboxService: SandboxServiceProtocol {
         self.log.debug("enter", metadata: ["func": "\(#function)"])
         defer { self.log.debug("exit", metadata: ["func": "\(#function)"]) }
 
-        // Provision the bundle if it doesn't exist yet
+        // Provision the bundle if it doesn't exist yet (safety net for start on existing containers)
         if loadBundle(at: self.root) == nil {
             try await self.createBundle()
-        }
-
-        // If create-only, return without booting the VM
-        let createOnly = message.bool(key: SandboxKeys.createOnly.rawValue)
-        if createOnly {
-            return message.reply()
         }
 
         return try await self.lock.withLock { _ in
@@ -159,11 +165,9 @@ public actor LinuxSandboxService: SandboxServiceProtocol {
                 )
             }
 
-<<<<<<< HEAD
             let dynamicEnv = try message.dynamicEnv()
-=======
+            
             let bundle = LinuxBundle(path: self.root)
->>>>>>> 52dbf28 (Reverting to previous architecture)
             try bundle.createLogFile()
 
             var config = try bundle.configuration
@@ -1468,10 +1472,9 @@ extension LinuxSandboxService {
         }
     }
 
-    /// Create bundle from RuntimeConfiguration.
-    /// Binary files (kernel.bin, initfs.ext4, rootfs.ext4) are already provisioned
-    /// by the API server via source processing. This method writes only the JSON
-    /// metadata files that the bootstrap process expects.
+    /// Provision the full bundle from RuntimeConfiguration.
+    /// Decodes the opaque runtime data and provisions all Linux-specific resources
+    /// (kernel binary, init filesystem, container rootfs) as well as common metadata files.
     private func createBundle() async throws {
         do {
             let runtimeConfig = try RuntimeConfiguration.readRuntimeConfiguration(from: self.root)

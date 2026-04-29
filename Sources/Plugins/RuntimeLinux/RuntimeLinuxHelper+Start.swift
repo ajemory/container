@@ -105,6 +105,7 @@ extension RuntimeLinuxHelper {
                         SandboxRoutes.shutdown.rawValue: server.shutdown,
                         SandboxRoutes.statistics.rawValue: server.statistics,
                         SandboxRoutes.export.rawValue: server.export,
+                        SandboxRoutes.provision.rawValue: server.provision,
                     ],
                     log: log
                 )

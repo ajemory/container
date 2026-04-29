@@ -68,4 +68,7 @@ public protocol SandboxServiceProtocol: Actor {
 
     /// Export the container's filesystem image.
     func export(_ message: XPCMessage) async throws -> XPCMessage
+
+    /// Provision the container bundle without starting the VM.
+    func provision(_ message: XPCMessage) async throws -> XPCMessage
 }

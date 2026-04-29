@@ -18,44 +18,49 @@ import Containerization
 import ContainerizationError
 import Foundation
 
-open class Bundle: @unchecked Sendable {
-    public static let containerConfigFilename = "config.json"
-    public static let containerOptionsFilename = "options.json"
-    private static let containerLogFilename = "stdio.log"
-    private static let bootLogFilename = "boot.log"
+/// Contract for runtime-specific bundle types.
+/// Provides standardized file conventions and common operations.
+/// Each runtime defines a conforming struct with additional runtime-specific properties.
+public protocol Bundle: Sendable {
+    var path: URL { get }
+    init(path: URL)
+}
 
-    public let path: URL
+// MARK: - Standardized filenames
 
-    public required init(path: URL) {
-        self.path = path
-    }
+extension Bundle {
+    public static var containerConfigFilename: String { "config.json" }
+    public static var containerOptionsFilename: String { "options.json" }
+}
 
-    open var configuration: ContainerConfiguration {
+// MARK: - Default implementations
+
+extension Bundle {
+    public var configuration: ContainerConfiguration {
         get throws {
-            try load(path: self.path.appendingPathComponent(Self.containerConfigFilename))
+            try load(filename: Self.containerConfigFilename)
         }
     }
 
-    open var containerLog: URL {
-        self.path.appendingPathComponent(Self.containerLogFilename)
+    public var containerLog: URL {
+        path.appendingPathComponent("stdio.log")
     }
 
-    open var bootlog: URL {
-        self.path.appendingPathComponent(Self.bootLogFilename)
+    public var bootlog: URL {
+        path.appendingPathComponent("boot.log")
     }
 
     /// Create the bundle directory and write common metadata files.
-    /// Runtime subclasses call this first, then write runtime-specific files.
     @discardableResult
-    open class func create(
+    public static func create(
         path: URL,
         configuration: ContainerConfiguration,
         options: ContainerCreateOptions
     ) throws -> Self {
         try FileManager.default.createDirectory(at: path, withIntermediateDirectories: true)
-        let bundle = Self.init(path: path)
-        try bundle.write(filename: Self.containerConfigFilename, value: configuration)
-        try bundle.write(filename: Self.containerOptionsFilename, value: options)
+        let bundle = Self(path: path)
+        try bundle.write(filename: containerConfigFilename, value: configuration)
+        try bundle.write(filename: containerOptionsFilename, value: options)
         return bundle
     }
 
@@ -67,25 +72,28 @@ open class Bundle: @unchecked Sendable {
         path.appendingPathComponent(name)
     }
 
-    open func delete() throws {
+    public func delete() throws {
         try FileManager.default.removeItem(at: self.path)
     }
 
     public func write(filename: String, value: Encodable) throws {
-        try Self.write(self.path.appendingPathComponent(filename), value: value)
-    }
-
-    public static func write(_ path: URL, value: Encodable) throws {
         let data = try JSONEncoder().encode(value)
-        try data.write(to: path)
+        try data.write(to: path.appendingPathComponent(filename))
     }
 
     public func load<T>(filename: String) throws -> T where T: Decodable {
-        try load(path: self.path.appendingPathComponent(filename))
-    }
-
-    public func load<T>(path: URL) throws -> T where T: Decodable {
-        let data = try Data(contentsOf: path)
+        let data = try Data(contentsOf: path.appendingPathComponent(filename))
         return try JSONDecoder().decode(T.self, from: data)
+    }
+}
+
+// MARK: - ContainerBundle
+
+/// Default bundle type used by the API server for common operations.
+public struct ContainerBundle: Bundle {
+    public let path: URL
+
+    public init(path: URL) {
+        self.path = path
     }
 }

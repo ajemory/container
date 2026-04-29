@@ -21,12 +21,18 @@ import ContainerizationError
 import Foundation
 import SystemPackage
 
-public final class LinuxBundle: ContainerResource.Bundle, @unchecked Sendable {
+public struct LinuxBundle: ContainerResource.Bundle {
     static let initfsFilename = "initfs.ext4"
     static let kernelFilename = "kernel.json"
     static let kernelBinaryFilename = "kernel.bin"
     static let containerRootFsBlockFilename = "rootfs.ext4"
     static let containerRootFsFilename = "rootfs.json"
+
+    public let path: URL
+
+    public init(path: URL) {
+        self.path = path
+    }
 
     public var containerRootfsBlock: URL {
         self.path.appendingPathComponent(Self.containerRootFsBlockFilename)
